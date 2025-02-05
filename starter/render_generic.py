@@ -8,14 +8,16 @@ Usage:
 """
 import argparse
 import pickle
-
+import imageio
+import os
 import matplotlib.pyplot as plt
 import mcubes
 import numpy as np
 import pytorch3d
 import torch
+import math
 
-from starter.utils import get_device, get_mesh_renderer, get_points_renderer
+from starter.utils import get_device, get_mesh_renderer, get_points_renderer, unproject_depth_image
 
 
 def load_rgbd_data(path="data/rgbd_data.pkl"):
@@ -78,6 +80,94 @@ def render_sphere(image_size=256, num_samples=200, device=None):
     rend = renderer(sphere_point_cloud, cameras=cameras)
     return rend[0, ..., :3].cpu().numpy()
 
+def render_torus(image_size=256, num_samples=200, device=None):
+    """
+    Renders a torus using parametric sampling. Samples num_samples ** 2 points.
+    """
+
+    if device is None:
+        device = get_device()
+
+    phi = torch.linspace(0, 2 * np.pi, num_samples)
+    theta = torch.linspace(0, 2 * np.pi, num_samples)
+    # Densely sample phi and theta on a grid
+    Phi, Theta = torch.meshgrid(phi, theta)
+
+    x = (1 + 0.5 * torch.cos(Theta)) * torch.cos(Phi)
+    y = (1 + 0.5 * torch.cos(Theta)) * torch.sin(Phi)
+    z = 0.5 * torch.sin(Theta)
+
+    points = torch.stack((x.flatten(), y.flatten(), z.flatten()), dim=1)
+    color = (points - points.min()) / (points.max() - points.min())
+
+    torus_point_cloud = pytorch3d.structures.Pointclouds(
+        points=[points], features=[color],
+    ).to(device)
+
+    cameras = pytorch3d.renderer.FoVPerspectiveCameras(T=[[0, 0, 3]], device=device)
+    renderer = get_points_renderer(image_size=image_size, device=device)
+    rend = renderer(torus_point_cloud, cameras=cameras)
+    return rend[0, ..., :3].cpu().numpy()
+
+def render_torus_gif(
+    image_size=256,
+    num_samples=200,
+    num_frames=60,
+    fps=15,
+    output_path="images/torus_rotate.gif",
+    device=None,
+):
+    """
+    Renders a 360-degree rotation of the torus as a point cloud along a spherical trajectory and saves it as a GIF.
+
+    Args:
+        image_size (int): The size of the rendered image.
+        num_samples (int): Number of samples for the torus parametric grid.
+        num_frames (int): Number of frames in the GIF.
+        fps (int): Frames per second for the GIF.
+        output_path (str): Path where the output GIF will be saved.
+        device: Device to run the rendering on.
+    """
+    if device is None:
+        device = get_device()
+
+    # Generate the torus point cloud (using the same parametric sampling as in render_torus)
+    phi = torch.linspace(0, 2 * np.pi, num_samples)
+    theta = torch.linspace(0, 2 * np.pi, num_samples)
+    Phi, Theta = torch.meshgrid(phi, theta, indexing="ij")
+    x = (1 + 0.5 * torch.cos(Theta)) * torch.cos(Phi)
+    y = (1 + 0.5 * torch.cos(Theta)) * torch.sin(Phi)
+    z = 0.5 * torch.sin(Theta)
+    points = torch.stack((x.flatten(), y.flatten(), z.flatten()), dim=1)
+    color = (points - points.min()) / (points.max() - points.min())
+    torus_point_cloud = pytorch3d.structures.Pointclouds(
+        points=[points.to(device)], features=[color.to(device)]
+    )
+
+    # Create a points renderer.
+    renderer = get_points_renderer(image_size=image_size, device=device)
+
+    images = []  # To store rendered frames
+    distance = 3.0  # Distance of the camera from the torus
+
+    # Generate frames along a 360-degree rotation.
+    for i in range(num_frames):
+        azim = 360 * i / num_frames
+        # Optionally vary elevation sinusoidally between -30° and 30°
+        elev = 30 * math.sin(2 * math.pi * i / num_frames)
+        R, T = pytorch3d.renderer.look_at_view_transform(dist=distance, elev=elev, azim=azim, device=device)
+        cameras = pytorch3d.renderer.FoVPerspectiveCameras(R=R, T=T, fov=60, device=device)
+        # Render the current frame.
+        image = renderer(torus_point_cloud, cameras=cameras)
+        # Convert the image to uint8.
+        frame = (image[0, ..., :3].cpu().numpy() * 255).astype(np.uint8)
+        images.append(frame)
+        print(f"Rendered frame {i+1}/{num_frames}: azimuth {azim:.1f}°, elevation {elev:.1f}°")
+
+    duration = 1 / fps  # Duration per frame in seconds
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    imageio.mimsave(output_path, images, duration=duration, loop=0)
+    print(f"GIF saved to {output_path}")
 
 def render_sphere_mesh(image_size=256, voxel_size=64, device=None):
     if device is None:
@@ -105,6 +195,167 @@ def render_sphere_mesh(image_size=256, voxel_size=64, device=None):
     rend = renderer(mesh, cameras=cameras, lights=lights)
     return rend[0, ..., :3].detach().cpu().numpy().clip(0, 1)
 
+def render_torus_gif_implicit(
+    image_size=256,
+    voxel_size=64,
+    num_frames=60,
+    fps=15,
+    output_path="images/torus_implicit_rotate.gif",
+    device=None,
+):
+    """
+    Renders a 360-degree rotation of an implicitly defined torus using marching cubes
+    and saves it as a GIF.
+
+    Args:
+        image_size (int): The size of the rendered image.
+        voxel_size (int): Resolution of the voxel grid for marching cubes.
+        num_frames (int): Number of frames in the GIF.
+        fps (int): Frames per second for the GIF.
+        output_path (str): Path where the output GIF will be saved.
+        device: Device to run the rendering on.
+    """
+    if device is None:
+        device = get_device()
+
+    R = 1.0
+    r = 0.5
+    min_value = -2.0
+    max_value = 2.0
+    
+    X, Y, Z = torch.meshgrid(
+        [torch.linspace(min_value, max_value, voxel_size)] * 3,
+        indexing='ij'
+    )
+    
+    voxels = (torch.sqrt(X**2 + Y**2) - R)**2 + Z**2 - r**2
+
+    vertices, faces = mcubes.marching_cubes(mcubes.smooth(voxels.numpy()), isovalue=0)
+    
+    vertices = torch.tensor(vertices).float()
+    vertices = (vertices / (voxel_size-1)) * (max_value - min_value) + min_value
+    
+    textures = (vertices - vertices.min()) / (vertices.max() - vertices.min())
+    textures = pytorch3d.renderer.TexturesVertex(verts_features=textures.unsqueeze(0).to(device))
+
+    faces = torch.tensor(faces.astype(np.int64)).to(device)
+    mesh = pytorch3d.structures.Meshes(
+        verts=[vertices.to(device)], 
+        faces=[faces], 
+        textures=textures
+    )
+
+    renderer = get_mesh_renderer(image_size=image_size, device=device)
+    lights = pytorch3d.renderer.PointLights(location=[[0, 0.0, -4.0]], device=device)
+
+    images = []
+    distance = 5.0 
+
+    for i in range(num_frames):
+        azim = 360 * i / num_frames
+        elev = 30 * math.sin(2 * math.pi * i / num_frames) 
+        
+        R_cam, T_cam = pytorch3d.renderer.look_at_view_transform(
+            dist=distance, 
+            elev=elev, 
+            azim=azim, 
+            device=device
+        )
+        
+        cameras = pytorch3d.renderer.FoVPerspectiveCameras(
+            R=R_cam, 
+            T=T_cam, 
+            fov=60, 
+            device=device
+        )
+
+        rend = renderer(mesh, cameras=cameras, lights=lights)
+        image = rend[0, ..., :3].cpu().numpy().clip(0, 1)
+        images.append((image * 255).astype(np.uint8))
+        
+        print(f"Rendered frame {i+1}/{num_frames}: azim={azim:.1f}°, elev={elev:.1f}°")
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    imageio.mimsave(output_path, images, fps=fps, loop=0)
+    print(f"GIF saved to {output_path}")
+    
+def render_mobius_strip(image_size=256, num_samples=1000, device=None):
+    """
+    Renders a Möbius strip using parametric sampling. Samples num_samples ** 2 points.
+    """
+    if device is None:
+        device = get_device()
+
+    u = torch.linspace(0, 2 * np.pi, num_samples)  
+    v = torch.linspace(-0.5, 0.5, num_samples)     
+    
+    U, V = torch.meshgrid(u, v, indexing='ij')
+    
+    w = 0.2  # width
+    x = (1 + w * V * torch.cos(U/2)) * torch.cos(U)
+    y = (1 + w * V * torch.cos(U/2)) * torch.sin(U)
+    z = w * V * torch.sin(U/2)
+
+    points = torch.stack((x.flatten(), y.flatten(), z.flatten()), dim=1)
+    
+    color = (points - points.min()) / (points.max() - points.min())
+
+    mobius_point_cloud = pytorch3d.structures.Pointclouds(
+        points=[points.to(device)], 
+        features=[color.to(device)]
+    )
+
+    cameras = pytorch3d.renderer.FoVPerspectiveCameras(
+        T=[[0, 0, 3]],  
+        device=device
+    )
+    renderer = get_points_renderer(image_size=image_size, device=device)
+    
+
+    rend = renderer(mobius_point_cloud, cameras=cameras)
+    return rend[0, ..., :3].cpu().numpy()
+
+def render_mobius_strip_gif(image_size=256, num_samples=1000, num_frames=60,fps=15, device=None):
+    """
+    Renders a Möbius strip using parametric sampling. Samples num_samples ** 2 points.
+    """
+    if device is None:
+        device = get_device()
+
+    u = torch.linspace(0, 2 * np.pi, num_samples)  
+    v = torch.linspace(-0.5, 0.5, num_samples)     
+    
+    U, V = torch.meshgrid(u, v, indexing='ij')
+    
+    w = 0.5  # width
+    x = (1 + w * V * torch.cos(U/2)) * torch.cos(U)
+    y = (1 + w * V * torch.cos(U/2)) * torch.sin(U)
+    z = w * V * torch.sin(U/2)
+
+    points = torch.stack((x.flatten(), y.flatten(), z.flatten()), dim=1)
+    
+    color = (points - points.min()) / (points.max() - points.min())
+
+    mobius_point_cloud = pytorch3d.structures.Pointclouds(
+        points=[points.to(device)], 
+        features=[color.to(device)]
+    )
+
+    renderer = get_points_renderer(image_size=image_size, device=device)
+    images = []
+    distance = 3.0
+    
+    for i in range(num_frames):
+        azim = 360 * i / num_frames
+        elev = 30 * math.sin(2 * math.pi * i / num_frames)
+        R, T = pytorch3d.renderer.look_at_view_transform(dist=distance, elev=elev, azim=azim, device=device)
+        cameras = pytorch3d.renderer.FoVPerspectiveCameras(R=R, T=T, device=device)
+        image = renderer(mobius_point_cloud, cameras=cameras)
+        frame = (image[0, ..., :3].cpu().numpy() * 255).astype(np.uint8)
+        images.append(frame)
+    
+    duration = 1 / fps
+    imageio.mimsave("images/mobius_strip_rotate.gif", images, duration=duration, loop=0)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -112,7 +363,7 @@ if __name__ == "__main__":
         "--render",
         type=str,
         default="point_cloud",
-        choices=["point_cloud", "parametric", "implicit"],
+        choices=["point_cloud", "parametric", "implicit", "torus_gif", "torus_implicit_gif","mobius_strip", "mobius_gif"],
     )
     parser.add_argument("--output_path", type=str, default="images/bridge.jpg")
     parser.add_argument("--image_size", type=int, default=256)
@@ -121,9 +372,17 @@ if __name__ == "__main__":
     if args.render == "point_cloud":
         image = render_bridge(image_size=args.image_size)
     elif args.render == "parametric":
-        image = render_sphere(image_size=args.image_size, num_samples=args.num_samples)
+        image = render_torus(image_size=args.image_size, num_samples=args.num_samples)
     elif args.render == "implicit":
         image = render_sphere_mesh(image_size=args.image_size)
+    elif args.render == "torus_gif":
+        image = render_torus_gif(image_size=args.image_size, num_samples=args.num_samples)
+    elif args.render == "torus_implicit_gif":
+        image = render_torus_gif_implicit(image_size=args.image_size)
+    elif args.render == "mobius_strip":
+        image = render_mobius_strip(image_size=args.image_size)
+    elif args.render == "mobius_gif":
+        image = render_mobius_strip_gif(image_size=args.image_size)
     else:
         raise Exception("Did not understand {}".format(args.render))
     plt.imsave(args.output_path, image)

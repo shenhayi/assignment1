@@ -126,7 +126,6 @@ def render_cow_gif(
     imageio.mimsave(output_path, images, duration=duration, loop=0)
     print(f"GIF saved to {output_path}")
 
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Render a 360-degree rotating cow GIF with a spherical viewpoint using PyTorch3D."
