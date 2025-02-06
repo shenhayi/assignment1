@@ -39,7 +39,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--cow_path", type=str, default="data/cow.obj")
     parser.add_argument("--image_size", type=int, default=256)
-    parser.add_argument("--output_path", type=str, default="images/textured_cow_y.jpg")
+    parser.add_argument("--output_path", type=str, default="images/textured_cow_upf.jpg")
     
     R_relative_upf=[[1, 0, 0], [0, 1, 0], [0, 0, 1]]
     T_relative_upf=[0.5, -0.5, 0]
@@ -55,4 +55,4 @@ if __name__ == "__main__":
     T_relative_y_rotate=[-3, 0, 3]
     
     args = parser.parse_args()
-    plt.imsave(args.output_path, render_textured_cow(cow_path=args.cow_path, image_size=args.image_size, R_relative=R_relative_y_rotate, T_relative=T_relative_y_rotate))
+    plt.imsave(args.output_path, render_textured_cow(cow_path=args.cow_path, image_size=args.image_size, R_relative=R_relative_upf, T_relative=T_relative_upf))

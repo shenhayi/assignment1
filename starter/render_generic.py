@@ -357,13 +357,199 @@ def render_mobius_strip_gif(image_size=256, num_samples=1000, num_frames=60,fps=
     duration = 1 / fps
     imageio.mimsave("images/mobius_strip_rotate.gif", images, duration=duration, loop=0)
 
+def render_mobius_strip_gif_implicit(
+    image_size=256,
+    voxel_size=128,
+    num_frames=60,
+    fps=15,
+    output_path="images/mobius_implicit_rotate.gif",
+    device=None,
+):
+    """
+    Renders a Möbius strip using a corrected implicit equation and parameterization
+    """
+    if device is None:
+        device = get_device()
+
+    # Adjusted grid bounds for Mobius strip dimensions
+    min_value = -2.5
+    max_value = 2.5
+    
+    # Create 3D grid with higher resolution
+    X, Y, Z = torch.meshgrid(
+        [torch.linspace(min_value, max_value, voxel_size)] * 3,
+        indexing='ij'
+    )
+    
+    # Corrected implicit equation for Möbius strip
+    R = 1.0  # Major radius
+    w = 0.3  # Half-width parameter
+    term1 = (X**2 + Y**2 + Z**2)**2
+    term2 = 2*(X**2 + Y**2 + Z**2)*(R**2 - w**2 + X**2 + Y**2)
+    term3 = (R**2 + w**2 - X**2 - Y**2)**2 - 4*R**2*(X**2 - Y**2) - 8*R*w*Y*Z
+    voxels = term1 - term2 + term3
+
+    # Extract surface using marching cubes
+    vertices, faces = mcubes.marching_cubes(voxels.numpy(), 0)
+    
+    # Normalize vertices to world coordinates
+    vertices = torch.tensor(vertices).float()
+    vertices = (vertices / (voxel_size-1)) * (max_value - min_value) + min_value
+    
+    # Create vertex-based coloring
+    textures = (vertices - vertices.min()) / (vertices.max() - vertices.min())
+    textures = pytorch3d.renderer.TexturesVertex(textures.unsqueeze(0).to(device))
+
+    # Create mesh with face normals
+    mesh = pytorch3d.structures.Meshes(
+        verts=[vertices.to(device)],
+        faces=[torch.tensor(faces.astype(np.int64)).to(device)],
+        textures=textures
+    )
+
+    # Configure renderer with improved lighting
+    renderer = get_mesh_renderer(image_size=image_size, device=device)
+    lights = pytorch3d.renderer.PointLights(
+        location=[[0, 2.0, -2.0]],
+        diffuse_color=((0.9, 0.9, 0.9),),
+        specular_color=((0.3, 0.3, 0.3),),
+        device=device
+    )
+
+    # Generate rotation animation
+    images = []
+    distance = 10.0  # Optimal viewing distance
+
+    for i in range(num_frames):
+        azim = 360 * i / num_frames
+        elev = 20 * math.sin(2 * math.pi * i / num_frames)  # Gentle elevation change
+        
+        R_cam, T_cam = pytorch3d.renderer.look_at_view_transform(
+            dist=distance, 
+            elev=elev, 
+            azim=azim, 
+            device=device
+        )
+        
+        cameras = pytorch3d.renderer.FoVPerspectiveCameras(
+            R=R_cam, 
+            T=T_cam, 
+            fov=50,  # Field of view adjustment
+            device=device
+        )
+
+        # Render with anti-aliasing
+        rend = renderer(mesh, cameras=cameras, lights=lights)
+        image = rend[0, ..., :3].cpu().numpy().clip(0, 1)
+        images.append((image * 255).astype(np.uint8))
+        
+        print(f"Rendered frame {i+1}/{num_frames}")
+
+    # Save animated GIF
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    imageio.mimsave(output_path, images, fps=fps, loop=0)
+    print(f"GIF saved to {output_path}")
+    
+def render_octahedron_gif_implicit(
+    image_size=512,
+    voxel_size=128,
+    num_frames=60,
+    fps=15,
+    output_path="images/octahedron_rotate.gif",
+    device=None,
+):
+    """
+    Renders an octahedron using implicit surface representation with marching cubes
+    """
+    if device is None:
+        device = get_device()
+
+    # 定义三维网格参数
+    grid_min = -2.0
+    grid_max = 2.0
+    
+    # 创建三维体素网格
+    X, Y, Z = torch.meshgrid(
+        [torch.linspace(grid_min, grid_max, voxel_size)] * 3,
+        indexing='ij'
+    )
+    
+    # 八面体隐式方程 (|x| + |y| + |z| = 1 的平滑版本)
+    a = 1.2  # 形状参数
+    smoothness = 0.8  # 平滑系数
+    voxels = (X.abs()**a + Y.abs()**a + Z.abs()**a)**(1/a) - smoothness
+
+    # 使用行进立方体提取表面
+    vertices, faces = mcubes.marching_cubes(voxels.numpy(), 0)
+    
+    # 将顶点坐标标准化到世界坐标系
+    vertices = torch.tensor(vertices).float()
+    vertices = (vertices / (voxel_size-1)) * (grid_max - grid_min) + grid_min
+    
+    # 创建顶点颜色纹理
+    textures = (vertices - vertices.min()) / (vertices.max() - vertices.min())
+    textures = pytorch3d.renderer.TexturesVertex(textures.unsqueeze(0).to(device))
+
+    # 构建网格对象
+    mesh = pytorch3d.structures.Meshes(
+        verts=[vertices.to(device)],
+        faces=[torch.tensor(faces.astype(np.int64)).to(device)],
+        textures=textures
+    )
+
+    # 配置渲染器
+    renderer = get_mesh_renderer(image_size=image_size, device=device)
+    lights = pytorch3d.renderer.PointLights(
+        location=[[0, 3.0, -3.0]],
+        diffuse_color=((0.8, 0.8, 0.8),),
+        specular_color=((0.4, 0.4, 0.4),),
+        device=device
+    )
+
+    # 生成动画帧
+    images = []
+    camera_distance = 4.0
+
+    for i in range(num_frames):
+        # 计算相机角度
+        azim = 360 * i / num_frames
+        elev = 20 * math.sin(2 * math.pi * i / num_frames)
+        
+        # 相机变换矩阵
+        R, T = pytorch3d.renderer.look_at_view_transform(
+            dist=camera_distance, 
+            elev=elev, 
+            azim=azim, 
+            device=device
+        )
+        
+        # 配置相机参数
+        cameras = pytorch3d.renderer.FoVPerspectiveCameras(
+            R=R, 
+            T=T, 
+            fov=45,
+            device=device
+        )
+
+        # 渲染当前帧
+        rend = renderer(mesh, cameras=cameras, lights=lights)
+        image = rend[0, ..., :3].cpu().numpy().clip(0, 1)
+        images.append((image * 255).astype(np.uint8))
+        
+        print(f"Rendered frame {i+1}/{num_frames}")
+
+    # 保存GIF
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    imageio.mimsave(output_path, images, fps=fps, loop=0)
+    print(f"GIF saved to {output_path}")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--render",
         type=str,
         default="point_cloud",
-        choices=["point_cloud", "parametric", "implicit", "torus_gif", "torus_implicit_gif","mobius_strip", "mobius_gif"],
+        choices=["point_cloud", "parametric", "implicit", "torus_gif", "torus_implicit_gif","mobius_strip", "mobius_gif","mobius_implicit_gif", "octagedron_implicit_gif"],
     )
     parser.add_argument("--output_path", type=str, default="images/bridge.jpg")
     parser.add_argument("--image_size", type=int, default=256)
@@ -383,6 +569,10 @@ if __name__ == "__main__":
         image = render_mobius_strip(image_size=args.image_size)
     elif args.render == "mobius_gif":
         image = render_mobius_strip_gif(image_size=args.image_size)
+    elif args.render == "mobius_implicit_gif":
+        image = render_mobius_strip_gif_implicit(image_size=args.image_size)
+    elif args.render == "octagedron_implicit_gif":
+        image = render_octahedron_gif_implicit(image_size=args.image_size)
     else:
         raise Exception("Did not understand {}".format(args.render))
     plt.imsave(args.output_path, image)
