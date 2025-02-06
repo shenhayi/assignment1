@@ -68,7 +68,7 @@
 
 ### 5.1 Rendering Point Clouds from RGB-D Images (10 points)
 
-
+![pointcloud](/home/haoyus/16825/PS/assignment1/images/pointcloud.gif)
 
 ### 5.2 Parametric Functions (10 + 5 points)
 

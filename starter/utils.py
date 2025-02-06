@@ -97,6 +97,8 @@ def unproject_depth_image(image, mask, depth, camera):
     image_shape = image.shape[0]
     ndc_pixel_coordinates = torch.linspace(1, -1, image_shape)
     Y, X = torch.meshgrid(ndc_pixel_coordinates, ndc_pixel_coordinates)
+    Y = Y.to(device)
+    X = X.to(device)
     xy_depth = torch.dstack([X, Y, depth])
     points = camera.unproject_points(
         xy_depth.to(device), in_ndc=False, from_ndc=False, world_coordinates=True,

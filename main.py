@@ -6,9 +6,10 @@ import torch
 import pytorch3d
 import numpy as np
 import mcubes
+import pickle
 from PIL import Image, ImageDraw
 from tqdm.auto import tqdm
-from starter.utils import get_device, get_mesh_renderer, load_cow_mesh
+from starter.utils import get_device, get_mesh_renderer, load_cow_mesh, unproject_depth_image, get_points_renderer
 
 
 def load_mesh(cow_path, color, device):
@@ -230,16 +231,15 @@ def render_textured_cow(
     
     duration = 1 / 15
     imageio.mimsave("images/retextured_cow.gif", images, duration=duration, loop=0)
-    
+
+# 4 
 def render_textured_cow_trans(
     cow_path="data/cow.obj",
     image_size=256,
     R_relative=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
     T_relative=[0, 0, 0],
-    device=None,
 ):
-    if device is None:
-        device = get_device()
+    device = get_device()
     meshes = pytorch3d.io.load_objs_as_meshes([cow_path]).to(device)
     R_relative = torch.tensor(R_relative).float()
     T_relative = torch.tensor(T_relative).float()
@@ -253,6 +253,77 @@ def render_textured_cow_trans(
     rend = renderer(meshes, cameras=cameras, lights=lights)
     return rend[0, ..., :3].cpu().numpy()
 
+def load_rgbd_data(path="data/rgbd_data.pkl"):
+    with open(path, "rb") as f:
+        data = pickle.load(f)
+    return data
+
+#5_1
+def render_rgbd_pointclouds(data_path="data/rgbd_data.pkl", image_size=512, output_dir="output_images"):
+    device = get_device()
+    data = load_rgbd_data(data_path)
+
+    rgb1    = torch.tensor(data["rgb1"], dtype=torch.float32).to(device)    # 
+    mask1   = torch.tensor(data["mask1"], dtype=torch.float32).to(device)     
+    depth1  = torch.tensor(data["depth1"], dtype=torch.float32).to(device)    
+    camera1 = data["cameras1"].to(device) 
+
+    rgb2    = torch.tensor(data["rgb2"], dtype=torch.float32).to(device)
+    mask2   = torch.tensor(data["mask2"], dtype=torch.float32).to(device)
+    depth2  = torch.tensor(data["depth2"], dtype=torch.float32).to(device)
+    camera2 = data["cameras2"].to(device)
+    
+    
+    points1, rgba1 = unproject_depth_image(rgb1, mask1, depth1, camera1)
+    points2, rgba2 = unproject_depth_image(rgb2, mask2, depth2, camera2)
+    
+    pointcloud1 = pytorch3d.structures.Pointclouds(points=[points1], features=[rgba1])
+    pointcloud2 = pytorch3d.structures.Pointclouds(points=[points2], features=[rgba2])
+    
+    points_union = torch.cat([points1, points2], dim=0)
+    rgba_union   = torch.cat([rgba1, rgba2], dim=0)
+    pointcloud_union = pytorch3d.structures.Pointclouds(points=[points_union], features=[rgba_union])
+    
+    renderer = get_points_renderer(image_size=image_size, device=device)
+    
+    num_frames = 60  
+    images1 = []
+    images2 = []
+    images_union = []
+    
+    for i in range(num_frames):
+        azim = 360 * i / num_frames
+        elev = 30 * math.sin(2 * math.pi * i / num_frames)
+        distance = 10.0
+        R, T = pytorch3d.renderer.look_at_view_transform(dist=distance, elev=elev, azim=azim, device=device)
+        cam = pytorch3d.renderer.FoVPerspectiveCameras(R=R, T=T, device=device)
+        
+        frame1 = renderer(pointcloud1, cameras=cam)[0, ..., :3].cpu().numpy()
+        frame2 = renderer(pointcloud2, cameras=cam)[0, ..., :3].cpu().numpy()
+        frame_union = renderer(pointcloud_union, cameras=cam)[0, ..., :3].cpu().numpy()
+        
+        frame1 = np.rot90(frame1, 2)
+        frame2 = np.rot90(frame2, 2)
+        frame_union = np.rot90(frame_union, 2)
+        
+        frame1 = (frame1 * 255).astype(np.uint8)
+        frame2 = (frame2 * 255).astype(np.uint8)
+        frame_union = (frame_union * 255).astype(np.uint8)
+        
+        images1.append(frame1)
+        images2.append(frame2)
+        images_union.append(frame_union)
+    
+
+    duration = 1 / 15  
+    combined_images = []
+    for f1, f2, f3 in zip(images1, images2, images_union):
+        combined_frame = np.concatenate((f1, f2, f3), axis=1)
+        combined_images.append(combined_frame)
+    
+    imageio.mimsave("images/pointcloud.gif", combined_images, duration=duration, loop=0)
+    
+    
 # 5_2_1
 def render_torus_gif(
     image_size=256,
@@ -458,6 +529,7 @@ def render_octahedron_gif_implicit(
         
     imageio.mimsave(output_path, images, fps=fps, loop=0)
 
+# 6
 def render_octahedron_dolly_zoom(
     image_size=512,
     voxel_size=128,
@@ -551,7 +623,6 @@ if __name__ == "__main__":
     R_relative_y_rotate=[[math.cos(theta), 0, math.sin(theta)], [0, 1, 0], [-math.sin(theta), 0, math.cos(theta)]]
     T_relative_y_rotate=[-3, 0, 3]
     
-    parser.add_argument("--cow_path", type=str, default="data/cow.obj", help="Path to the cow OBJ file.")
     args = parser.parse_args()
     if args.render == "1_1":
         render_cow_gif()
@@ -572,7 +643,7 @@ if __name__ == "__main__":
     elif args.render == "4_4":
         plt.imsave("images/textured_cow_y_rotate.jpg", render_textured_cow_trans(cow_path=args.cow_path, R_relative=R_relative_y_rotate, T_relative=T_relative_y_rotate))
     elif args.render == "5_1":
-        render_textured_cow()
+        render_rgbd_pointclouds()
     elif args.render == "5_2_1":
         render_torus_gif()
     elif args.render == "5_2_2":
